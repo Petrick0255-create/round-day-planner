@@ -1,24 +1,68 @@
 const DAYS = ['일요일','월요일','화요일','수요일','목요일','금요일','토요일'];
 const COLORS = ['#789aa2','#e6bd62','#dc8862','#8aa17a','#b38aa7','#78a892','#c59366','#9b8fb5'];
-const STORAGE_KEY = 'roundDayStateV3';
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const clone = value => JSON.parse(JSON.stringify(value));
 
-let state = loadState();
+const firebaseConfig = {
+  apiKey: 'AIzaSyDaXVCb0TFIq4aPedBOydkT7k6h0yvU9hg',
+  authDomain: 'round-planner.firebaseapp.com',
+  projectId: 'round-planner',
+  storageBucket: 'round-planner.firebasestorage.app',
+  messagingSenderId: '857867289219',
+  appId: '1:857867289219:web:3d907a73f0ec4c367b11b6'
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+const googleProvider = new firebase.auth.GoogleAuthProvider();
+
+let state = emptyState();
+let currentUser = null;
+let authReady = false;
 let dayIndex = new Date().getDay();
 let selected = -1;
 let editing = null;
 
-function loadState() {
+function emptyState() { return { version: 4, active: null, plans: [] }; }
+async function save() {
+  if (!currentUser) return;
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
-    if (saved?.version === 3 && Array.isArray(saved.plans)) return saved;
-  } catch (_) {}
-  return { version: 3, active: null, plans: [] };
+    await db.collection('users').doc(currentUser.uid).collection('planner').doc('state').set({
+      data: JSON.stringify(state),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (error) {
+    console.error(error);
+    toast('저장하지 못했습니다. 인터넷 연결을 확인해주세요');
+  }
 }
 
-function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+async function loadCloudState(user) {
+  try {
+    const snap = await db.collection('users').doc(user.uid).collection('planner').doc('state').get();
+    if (!snap.exists) return emptyState();
+    const parsed = JSON.parse(snap.data().data || '{}');
+    return Array.isArray(parsed.plans) ? { ...parsed, version: 4 } : emptyState();
+  } catch (error) {
+    console.error(error);
+    toast('시간표를 불러오지 못했습니다');
+    return emptyState();
+  }
+}
+
+function requireLogin() {
+  if (currentUser) return true;
+  signIn();
+  return false;
+}
+
+async function signIn() {
+  try { await auth.signInWithPopup(googleProvider); }
+  catch (error) { if (error.code !== 'auth/popup-closed-by-user') toast('Google 로그인에 실패했습니다'); }
+}
+
+async function signOut() { await auth.signOut(); }
 function plan() { return state.plans.find(p => p.id === state.active) || null; }
 function items() { return plan()?.days?.[DAYS[dayIndex]] || []; }
 function fmt(minute) {
@@ -38,6 +82,8 @@ function render() {
   const nowIndex = active && isToday ? currentItemIndex() : -1;
   if (selected < 0) selected = Math.max(0, nowIndex);
   $('#todayChip').textContent = `${now.getMonth() + 1}월 ${now.getDate()}일`;
+  $('#authButton').textContent = currentUser ? `${currentUser.displayName || '사용자'} · 로그아웃` : 'Google 로그인';
+  $('#authButton').classList.toggle('signed-in', !!currentUser);
   $('#todayName').textContent = DAYS[dayIndex];
   $('#planName').textContent = active?.title || '선택된 시간표 없음';
   $('#centerDate').textContent = isToday ? `지금 ${fmt(currentMinute())}` : `${now.getMonth() + 1}.${now.getDate()}`;
@@ -87,6 +133,15 @@ function drawNowMarker() {
 }
 
 function renderSelected() {
+  if (!authReady) {
+    $('#selectedCard').innerHTML = '<div class="row"><div><span class="time">연결 중</span><h3>로그인 상태를 확인하고 있습니다</h3></div></div>';
+    return;
+  }
+  if (!currentUser) {
+    $('#selectedCard').innerHTML = `<div class="row"><div><span class="time">Google 계정</span><h3>로그인하고 시간표를 시작하세요</h3><p>내 시간표가 계정에 안전하게 저장됩니다.</p></div><button id="cardLogin">로그인</button></div>`;
+    $('#cardLogin').onclick = signIn;
+    return;
+  }
   if (!plan()) {
     $('#selectedCard').innerHTML = `<div class="row"><div><span class="time">빈 시간표</span><h3>내 계획을 직접 만들어 보세요</h3><p>고정된 예시 일정은 들어 있지 않습니다.</p></div><button id="emptyCreate">만들기</button></div>`;
     $('#emptyCreate').onclick = startWizard;
@@ -121,6 +176,7 @@ function switchTab(id) {
 }
 
 function startWizard() {
+  if (!requireLogin()) return;
   editing = { mode: 'new', step: 0, title: '', days: [...DAYS], dayIndex: 0, dayData: {} };
   renderWizard(); $('#wizard').showModal();
 }
@@ -150,10 +206,22 @@ function renderDayEditor(day, inWizard) {
   const sleepTime = existing?.sleepTime ?? 1380;
   const wakeTime = existing?.wakeTime ?? 420;
   editing.blocks = clone(existing?.blocks || []);
-  body.innerHTML = `<span class="eyebrow">${inWizard ? `${editing.dayIndex + 1} / ${editing.days.length}` : '요일 수정'} · ${day}</span><h2 class="question">${day}은<br>어떻게 보낼까요?</h2><div class="field"><label>${prev}에서 이어지는 취침 시각</label><div class="time-line"><select id="sleepWhen"><option value="prev">전날</option><option value="today">오늘</option></select><span></span><select id="sleepTime">${timeOptions()}</select></div></div><div class="field"><label>몇 시에 일어날 거야?</label><select id="wakeTime">${timeOptions()}</select></div><div id="scheduleBuilder"></div><button class="next-btn" type="button" id="saveDay">${inWizard ? (editing.dayIndex === editing.days.length - 1 ? '시간표 완성하기' : '다음 요일 계획하기') : '이 요일 저장하기'}</button>`;
+  body.innerHTML = `<span class="eyebrow">${inWizard ? `${editing.dayIndex + 1} / ${editing.days.length}` : '요일 수정'} · ${day}</span><h2 class="question">${day}은<br>어떻게 보낼까요?</h2><button class="copy-day-button" type="button" id="copyPrevious">⧉ ${prev} 내용 복사</button><div class="field"><label>${prev}에서 이어지는 취침 시각</label><div class="time-line"><select id="sleepWhen"><option value="prev">전날</option><option value="today">오늘</option></select><span></span><select id="sleepTime">${timeOptions()}</select></div></div><div class="field"><label>몇 시에 일어날 거야?</label><select id="wakeTime">${timeOptions()}</select></div><div id="scheduleBuilder"></div><button class="next-btn" type="button" id="saveDay">${inWizard ? (editing.dayIndex === editing.days.length - 1 ? '시간표 완성하기' : '다음 요일 계획하기') : '이 요일 저장하기'}</button>`;
   $('#sleepWhen').value = sleepWhen; $('#sleepTime').value = sleepTime; $('#wakeTime').value = wakeTime;
   renderScheduleBuilder();
+  $('#copyPrevious').onclick = () => copyPreviousDay(day, inWizard);
   $('#saveDay').onclick = () => saveEditedDay(day, inWizard);
+}
+
+function copyPreviousDay(day, inWizard) {
+  const prev = DAYS[(DAYS.indexOf(day) + 6) % 7];
+  const source = inWizard ? editing.dayData?.[prev] : state.plans.find(x => x.id === editing.planId)?.daySettings?.[prev];
+  if (!source) return toast(`${prev}에 복사할 내용이 없습니다`);
+  const copied = clone(source);
+  if (inWizard) editing.dayData[day] = copied;
+  else editing.existing = copied;
+  renderDayEditor(day, inWizard);
+  toast(`${prev} 내용을 복사했습니다`);
 }
 
 function renderScheduleBuilder() {
@@ -202,6 +270,7 @@ function finishWizard() {
 }
 
 function editPlanDay(day) {
+  if (!requireLogin()) return;
   if (!plan()) return startWizard();
   const p = plan();
   editing = { mode: 'day', planId: p.id, existing: p.daySettings?.[day] || { blocks: p.days[day]?.filter(x => x.title !== '꿈나라') || [] } };
@@ -209,6 +278,7 @@ function editPlanDay(day) {
 }
 
 function openPlanManager(planId) {
+  if (!requireLogin()) return;
   const p = state.plans.find(x => x.id === planId);
   editing = { planId };
   $('#detail .modal-head b').textContent = '시간표 관리'; $('#deleteItem').style.visibility = 'visible';
@@ -220,6 +290,7 @@ function openPlanManager(planId) {
 }
 
 function openDetail(it) {
+  if (!requireLogin()) return;
   editing = { item: it };
   $('#detail .modal-head b').textContent = '일정 자세히'; $('#deleteItem').style.visibility = 'visible';
   $('#detailBody').innerHTML = `<div class="field"><label>일정 이름</label><input id="detailTitle" value="${escapeHtml(it.title)}"></div><div class="field"><label>시간</label><div class="time-line"><select id="detailStart">${timeOptions()}</select><span>–</span><select id="detailEnd">${timeOptions()}</select></div><div id="conflict"></div></div><div class="field"><label>세부 계획 · 링크도 함께 저장할 수 있어요</label><textarea id="detailMemo">${escapeHtml(it.detail || '')}</textarea></div><button class="next-btn" type="button" id="saveDetail">저장하기</button>`;
@@ -251,4 +322,12 @@ $$('nav button').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 $('#prevDay').onclick = () => { dayIndex = (dayIndex + 6) % 7; selected = -1; render(); };
 $('#nextDay').onclick = () => { dayIndex = (dayIndex + 1) % 7; selected = -1; render(); };
 $('#newPlan').onclick = startWizard; $('#libraryAdd').onclick = startWizard;
+$('#authButton').onclick = () => currentUser ? signOut() : signIn();
+auth.onAuthStateChanged(async user => {
+  currentUser = user;
+  state = user ? await loadCloudState(user) : emptyState();
+  authReady = true;
+  selected = -1;
+  render();
+});
 render(); setInterval(() => { if (plan() && dayIndex === new Date().getDay()) { selected = currentItemIndex(); render(); } }, 60000);
