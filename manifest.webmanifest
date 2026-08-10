@@ -1,0 +1,17 @@
+{
+  "name": "동그란 하루",
+  "short_name": "동그란 하루",
+  "description": "방학 시간표처럼 쉽고 즐겁게 만드는 원형 주간 계획표",
+  "lang": "ko",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F2E9",
+  "theme_color": "#F7F2E9",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
