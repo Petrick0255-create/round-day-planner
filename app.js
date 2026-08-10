@@ -16,6 +16,8 @@ firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
 const googleProvider = new firebase.auth.GoogleAuthProvider();
+auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(() => {});
+db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
 
 let state = emptyState();
 let currentUser = null;
@@ -23,10 +25,12 @@ let authReady = false;
 let dayIndex = new Date().getDay();
 let selected = -1;
 let editing = null;
+let dragSelection = null;
 
 function emptyState() { return { version: 4, active: null, plans: [] }; }
 async function save() {
   if (!currentUser) return;
+  localStorage.setItem(`roundDayCache:${currentUser.uid}`, JSON.stringify(state));
   try {
     await db.collection('users').doc(currentUser.uid).collection('planner').doc('state').set({
       data: JSON.stringify(state),
@@ -36,6 +40,13 @@ async function save() {
     console.error(error);
     toast('저장하지 못했습니다. 인터넷 연결을 확인해주세요');
   }
+}
+
+function loadCachedState(user) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(`roundDayCache:${user.uid}`) || 'null');
+    return Array.isArray(parsed?.plans) ? { ...parsed, version: 4 } : emptyState();
+  } catch (_) { return emptyState(); }
 }
 
 async function loadCloudState(user) {
@@ -71,6 +82,23 @@ function fmt(minute) {
 }
 function currentMinute() { const now = new Date(); return now.getHours() * 60 + now.getMinutes(); }
 function currentItemIndex() { return items().findIndex(it => currentMinute() >= it.start && currentMinute() < it.end); }
+function daySetting() { return plan()?.daySettings?.[DAYS[dayIndex]] || null; }
+function dayStart() { return 0; }
+function toDisplayMinute(minute) { return minute; }
+function displayAngle(minute) { return minute / 1440 * Math.PI * 2 - Math.PI / 2; }
+function displayItems() {
+  const setting = daySetting();
+  return items().map((it, index) => {
+    if (it.title === '꿈나라' && setting?.sleepWhen === 'prev') return { ...it, _index: index, displayStart: Number(setting.sleepTime), displayEnd: Number(setting.wakeTime) + 1440 };
+    return { ...it, _index: index, displayStart: it.start, displayEnd: it.end };
+  });
+}
+function syncCurrentDaySetting() {
+  const setting = daySetting();
+  if (!setting) return;
+  setting.blocks = items().filter(it => it.title !== '꿈나라').map(it => clone(it));
+  setting.items = items().map(it => clone(it));
+}
 function timeOptions() {
   return Array.from({ length: 288 }, (_, i) => `<option value="${i * 5}">${fmt(i * 5)}</option>`).join('');
 }
@@ -102,9 +130,10 @@ function draw() {
     ctx.fillStyle = '#8b857a'; ctx.font = '700 23px Noto Sans KR'; ctx.textAlign = 'center';
     ctx.fillText('아직 계획이 없어요', C, C - 95);
   }
-  items().forEach((it, i) => {
-    const a = it.start / 1440 * Math.PI * 2 - Math.PI / 2;
-    const b = it.end / 1440 * Math.PI * 2 - Math.PI / 2;
+  displayItems().forEach(it => {
+    const i = it._index;
+    const a = displayAngle(it.displayStart);
+    const b = displayAngle(it.displayEnd);
     ctx.beginPath(); ctx.moveTo(C, C); ctx.arc(C, C, R, a, b); ctx.closePath();
     ctx.fillStyle = it.color; ctx.globalAlpha = i === selected ? 1 : .82; ctx.fill(); ctx.globalAlpha = 1;
     ctx.strokeStyle = '#f8f4ec'; ctx.lineWidth = 5; ctx.stroke();
@@ -115,18 +144,24 @@ function draw() {
     ctx.fillText(label, 0, 0); ctx.font = '600 14px DM Sans'; ctx.fillText(`${fmt(it.start)}–${fmt(it.end)}`, 0, 23); ctx.restore();
   });
   for (let h = 0; h < 24; h++) {
-    const a = h / 24 * Math.PI * 2 - Math.PI / 2;
+    const minute = h * 60;
+    const a = displayAngle(minute);
     ctx.beginPath(); ctx.moveTo(C + Math.cos(a) * (R - 10), C + Math.sin(a) * (R - 10));
     ctx.lineTo(C + Math.cos(a) * (R - 25), C + Math.sin(a) * (R - 25));
     ctx.strokeStyle = '#ffffffaa'; ctx.lineWidth = h % 3 === 0 ? 4 : 2; ctx.stroke();
     if (h % 3 === 0) { ctx.fillStyle = '#5d5a52'; ctx.font = '700 15px DM Sans'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(h, C + Math.cos(a) * (R + 23), C + Math.sin(a) * (R + 23)); }
+  }
+  if (dragSelection) {
+    const a = displayAngle(dragSelection.start), b = displayAngle(dragSelection.end);
+    ctx.beginPath(); ctx.moveTo(C, C); ctx.arc(C, C, R, a, b); ctx.closePath();
+    ctx.fillStyle = '#ffffff70'; ctx.fill(); ctx.strokeStyle = '#292b27'; ctx.lineWidth = 5; ctx.setLineDash([12,8]); ctx.stroke(); ctx.setLineDash([]);
   }
 }
 
 function drawNowMarker() {
   if (!plan() || dayIndex !== new Date().getDay()) return;
   const c = $('#clock'), ctx = c.getContext('2d'), C = c.width / 2, R = 314;
-  const a = currentMinute() / 1440 * Math.PI * 2 - Math.PI / 2;
+  const a = displayAngle(toDisplayMinute(currentMinute()));
   ctx.beginPath(); ctx.moveTo(C + Math.cos(a) * 82, C + Math.sin(a) * 82); ctx.lineTo(C + Math.cos(a) * (R + 4), C + Math.sin(a) * (R + 4));
   ctx.strokeStyle = '#292b27'; ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.stroke();
   ctx.beginPath(); ctx.arc(C + Math.cos(a) * (R + 4), C + Math.sin(a) * (R + 4), 9, 0, Math.PI * 2); ctx.fillStyle = '#292b27'; ctx.fill();
@@ -227,7 +262,7 @@ function copyPreviousDay(day, inWizard) {
 function renderScheduleBuilder() {
   const wake = +$('#wakeTime').value;
   const lastEnd = editing.blocks.length ? editing.blocks.at(-1).end : wake;
-  $('#scheduleBuilder').innerHTML = `<div class="schedule-stack">${editing.blocks.map((b,i) => `<div class="schedule-chip" style="border-color:${b.color}"><b>${fmt(b.start)} — ${fmt(b.end)}</b>${escapeHtml(b.title)} <button type="button" class="remove-block" data-index="${i}">×</button></div>`).join('')}</div><div class="field"><label>다음엔 뭘 할까?</label><input id="newBlockTitle" placeholder="예: 씻고 아침 먹기"><div class="time-line"><input value="${fmt(lastEnd)}" disabled><span>–</span><select id="newBlockEnd">${timeOptions()}</select></div><small>시작 시각은 앞 일정의 끝 시각으로 자동 연결됩니다.</small></div><button type="button" class="next-btn secondary-add" id="addBlock">＋ 일정 추가</button>`;
+  $('#scheduleBuilder').innerHTML = `<div class="schedule-stack">${editing.blocks.map((b,i) => `<div class="schedule-chip" style="border-color:${b.color}"><b>${fmt(b.start)} — ${fmt(b.end)}</b>${escapeHtml(b.title)} <span class="chip-color" style="background:${b.color}"></span><button type="button" class="remove-block" data-index="${i}">×</button></div>`).join('')}</div><div class="field"><label>다음엔 뭘 할까?</label><input id="newBlockTitle" placeholder="예: 씻고 아침 먹기"><div class="time-line"><input value="${fmt(lastEnd)}" disabled><span>–</span><select id="newBlockEnd">${timeOptions()}</select></div><div class="color-field"><label for="newBlockColor">일정 색상</label><input id="newBlockColor" type="color" value="${COLORS[editing.blocks.length % COLORS.length]}"></div><small>시작 시각은 앞 일정의 끝 시각으로 자동 연결됩니다.</small></div><button type="button" class="next-btn secondary-add" id="addBlock">＋ 일정 추가</button>`;
   $('#newBlockEnd').value = Math.min(lastEnd + 60, 1435);
   $('#addBlock').onclick = addBlock;
   $$('.remove-block').forEach(b => b.onclick = () => { editing.blocks.splice(+b.dataset.index, 1); editing.blocks.forEach((x,i) => { x.start = i ? editing.blocks[i-1].end : +$('#wakeTime').value; }); renderScheduleBuilder(); });
@@ -240,7 +275,7 @@ function addBlock() {
   const end = +$('#newBlockEnd').value;
   if (!title) return toast('할 일을 적어주세요');
   if (end <= start) return toast('끝나는 시간을 더 늦게 선택해주세요');
-  editing.blocks.push({ start, end, title, detail: '', color: COLORS[editing.blocks.length % COLORS.length] });
+  editing.blocks.push({ start, end, title, detail: '', color: $('#newBlockColor').value });
   renderScheduleBuilder();
 }
 
@@ -293,9 +328,9 @@ function openDetail(it) {
   if (!requireLogin()) return;
   editing = { item: it };
   $('#detail .modal-head b').textContent = '일정 자세히'; $('#deleteItem').style.visibility = 'visible';
-  $('#detailBody').innerHTML = `<div class="field"><label>일정 이름</label><input id="detailTitle" value="${escapeHtml(it.title)}"></div><div class="field"><label>시간</label><div class="time-line"><select id="detailStart">${timeOptions()}</select><span>–</span><select id="detailEnd">${timeOptions()}</select></div><div id="conflict"></div></div><div class="field"><label>세부 계획 · 링크도 함께 저장할 수 있어요</label><textarea id="detailMemo">${escapeHtml(it.detail || '')}</textarea></div><button class="next-btn" type="button" id="saveDetail">저장하기</button>`;
+  $('#detailBody').innerHTML = `<div class="field"><label>일정 이름</label><input id="detailTitle" value="${escapeHtml(it.title)}"></div><div class="field"><label>시간</label><div class="time-line"><select id="detailStart">${timeOptions()}</select><span>–</span><select id="detailEnd">${timeOptions()}</select></div><div id="conflict"></div></div><div class="color-field"><label for="detailColor">일정 색상</label><input id="detailColor" type="color" value="${it.color || COLORS[2]}"></div><div class="field"><label>세부 계획 · 링크도 함께 저장할 수 있어요</label><textarea id="detailMemo">${escapeHtml(it.detail || '')}</textarea></div><button class="next-btn" type="button" id="saveDetail">저장하기</button>`;
   $('#detailStart').value = it.start; $('#detailEnd').value = it.end; $('#saveDetail').onclick = saveDetail;
-  $('#deleteItem').onclick = () => { plan().days[DAYS[dayIndex]] = items().filter(x => x !== it); save(); $('#detail').close(); selected = -1; toast('일정을 삭제했습니다'); render(); };
+  $('#deleteItem').onclick = () => { plan().days[DAYS[dayIndex]] = items().filter(x => x !== it); syncCurrentDaySetting(); save(); $('#detail').close(); selected = -1; toast('일정을 삭제했습니다'); render(); };
   $('#detail').showModal();
 }
 
@@ -304,20 +339,99 @@ function saveDetail() {
   const other = items().find(x => x !== it && start < x.end && end > x.start);
   if (end <= start) return $('#conflict').innerHTML = '<div class="conflict">끝나는 시간은 시작 시간보다 늦어야 합니다.</div>';
   if (other) return $('#conflict').innerHTML = `<div class="conflict">${fmt(other.start)}부터 ‘${escapeHtml(other.title)}’ 일정이 있습니다.</div>`;
-  Object.assign(it, { start, end, title: $('#detailTitle').value.trim() || '이름 없는 일정', detail: $('#detailMemo').value });
-  items().sort((a,b) => a.start - b.start); save(); $('#detail').close(); selected = items().indexOf(it); toast('일정을 수정했습니다'); render();
+  Object.assign(it, { start, end, title: $('#detailTitle').value.trim() || '이름 없는 일정', detail: $('#detailMemo').value, color: $('#detailColor').value });
+  items().sort((a,b) => a.start - b.start); syncCurrentDaySetting(); save(); $('#detail').close(); selected = items().indexOf(it); toast('일정을 수정했습니다'); render();
+}
+
+function openNewRange(startDisplay, endDisplay) {
+  if (!requireLogin() || !plan()) return;
+  let start = startDisplay % 1440, end = endDisplay % 1440;
+  if (endDisplay - startDisplay < 5) endDisplay = startDisplay + 5;
+  start = startDisplay % 1440; end = endDisplay % 1440;
+  if (end <= start) {
+    toast('자정을 넘는 일정은 두 구간으로 나눠 입력해주세요');
+    return;
+  }
+  editing = { mode: 'newRange', start, end };
+  $('#detail .modal-head b').textContent = '새 일정';
+  $('#deleteItem').style.visibility = 'hidden';
+  $('#detailBody').innerHTML = `<div class="range-summary">${fmt(start)} — ${fmt(end)}</div><div class="field"><label>무엇을 할까요?</label><input id="rangeTitle" placeholder="예: 책 읽기, 운동하기" autofocus></div><div class="color-field"><label for="rangeColor">일정 색상</label><input id="rangeColor" type="color" value="${COLORS[items().length % COLORS.length]}"></div><div class="field"><label>세부 계획 · 링크도 함께 저장할 수 있어요</label><textarea id="rangeMemo" placeholder="필요하면 메모를 남겨주세요"></textarea></div><button class="next-btn" type="button" id="saveRange">일정 추가하기</button>`;
+  $('#saveRange').onclick = saveNewRange;
+  $('#detail').showModal();
+}
+
+function saveNewRange() {
+  const title = $('#rangeTitle').value.trim();
+  if (!title) return toast('일정 이름을 적어주세요');
+  const { start, end } = editing;
+  const conflict = items().find(it => start < it.end && end > it.start);
+  if (conflict) return toast(`${fmt(conflict.start)}부터 다른 일정이 있습니다`);
+  const newItem = { start, end, title, detail: $('#rangeMemo').value, color: $('#rangeColor').value };
+  items().push(newItem); items().sort((a,b) => a.start - b.start);
+  syncCurrentDaySetting();
+  save(); $('#detail').close(); selected = items().indexOf(newItem); toast('일정을 추가했습니다'); render();
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function toast(message) { const t = $('#toast'); t.textContent = message; t.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove('show'), 1800); }
 
-$('#clock').addEventListener('click', e => {
+function pointerDisplayMinute(e) {
+  const r = $('#clock').getBoundingClientRect();
+  const x = (e.clientX - r.left) / r.width * 720 - 360;
+  const y = (e.clientY - r.top) / r.height * 720 - 360;
+  let angle = Math.atan2(y, x) + Math.PI / 2;
+  if (angle < 0) angle += Math.PI * 2;
+  return dayStart() + Math.round(angle / (Math.PI * 2) * 288) * 5;
+}
+
+function showDragHint(start, end) {
+  const hint = $('#dragHint');
+  hint.textContent = `${fmt(start)}부터 ${fmt(end)}까지`;
+  hint.classList.add('show');
+}
+
+$('#clock').addEventListener('pointerdown', e => {
   if (!plan()) return startWizard();
-  const r = e.target.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * 720 - 360, y = (e.clientY - r.top) / r.height * 720 - 360;
-  let angle = Math.atan2(y, x) + Math.PI / 2; if (angle < 0) angle += Math.PI * 2;
-  const minute = angle / (Math.PI * 2) * 1440, found = items().findIndex(it => minute >= it.start && minute < it.end);
-  if (found >= 0) { selected = found; render(); }
+  const minute = pointerDisplayMinute(e);
+  const existing = displayItems().find(it => (minute >= it.displayStart && minute < it.displayEnd) || (minute + 1440 >= it.displayStart && minute + 1440 < it.displayEnd));
+  if (existing) {
+    dragSelection = { existingIndex: existing._index, startX: e.clientX, startY: e.clientY };
+    return;
+  }
+  e.preventDefault();
+  const nextBoundary = Math.min(dayStart() + 1440, ...displayItems().filter(it => it.displayStart > minute).map(it => it.displayStart));
+  dragSelection = { start: minute, end: Math.min(minute + 5, nextBoundary), nextBoundary, moved: false };
+  $('#clock').setPointerCapture(e.pointerId);
+  showDragHint(dragSelection.start, dragSelection.end);
+  draw(); drawNowMarker();
 });
+
+$('#clock').addEventListener('pointermove', e => {
+  if (!dragSelection || dragSelection.existingIndex !== undefined) return;
+  e.preventDefault();
+  let end = pointerDisplayMinute(e);
+  if (end < dragSelection.start) end += 1440;
+  end = Math.min(end, dragSelection.nextBoundary, dayStart() + 1440);
+  dragSelection.end = Math.max(dragSelection.start + 5, end);
+  dragSelection.moved = true;
+  showDragHint(dragSelection.start, dragSelection.end);
+  draw(); drawNowMarker();
+});
+
+$('#clock').addEventListener('pointerup', e => {
+  if (!dragSelection) return;
+  if (dragSelection.existingIndex !== undefined) {
+    const moved = Math.hypot(e.clientX - dragSelection.startX, e.clientY - dragSelection.startY) > 8;
+    if (!moved) { selected = dragSelection.existingIndex; dragSelection = null; render(); }
+    else dragSelection = null;
+    return;
+  }
+  const range = { ...dragSelection };
+  if (!range.moved) range.end = Math.min(range.start + 60, range.nextBoundary);
+  dragSelection = null; $('#dragHint').classList.remove('show'); render(); openNewRange(range.start, range.end);
+});
+
+$('#clock').addEventListener('pointercancel', () => { dragSelection = null; $('#dragHint').classList.remove('show'); render(); });
 $$('nav button').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 $('#prevDay').onclick = () => { dayIndex = (dayIndex + 6) % 7; selected = -1; render(); };
 $('#nextDay').onclick = () => { dayIndex = (dayIndex + 1) % 7; selected = -1; render(); };
@@ -325,8 +439,18 @@ $('#newPlan').onclick = startWizard; $('#libraryAdd').onclick = startWizard;
 $('#authButton').onclick = () => currentUser ? signOut() : signIn();
 auth.onAuthStateChanged(async user => {
   currentUser = user;
-  state = user ? await loadCloudState(user) : emptyState();
   authReady = true;
+  selected = -1;
+  if (!user) {
+    state = emptyState();
+    render();
+    return;
+  }
+  state = loadCachedState(user);
+  render();
+  const cloudState = await loadCloudState(user);
+  state = cloudState;
+  localStorage.setItem(`roundDayCache:${user.uid}`, JSON.stringify(state));
   selected = -1;
   render();
 });
