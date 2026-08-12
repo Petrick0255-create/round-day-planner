@@ -26,6 +26,9 @@ let dayIndex = new Date().getDay();
 let selected = -1;
 let editing = null;
 let dragSelection = null;
+let touchedItemIndex = -1;
+let wedgeAnimation = [];
+let wedgeAnimationFrame = 0;
 
 function emptyState() { return { version: 4, active: null, plans: [] }; }
 async function save() {
@@ -122,6 +125,14 @@ function render() {
   renderLists();
 }
 
+function fitHorizontalLabel(ctx, text, maxWidth) {
+  if (maxWidth < 20) return '';
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let shortened = text;
+  while (shortened.length > 1 && ctx.measureText(`${shortened}…`).width > maxWidth) shortened = shortened.slice(0, -1);
+  return shortened.length ? `${shortened}…` : '';
+}
+
 function draw() {
   const c = $('#clock'), ctx = c.getContext('2d'), C = c.width / 2, R = 314;
   ctx.clearRect(0, 0, c.width, c.height);
@@ -134,14 +145,42 @@ function draw() {
     const i = it._index;
     const a = displayAngle(it.displayStart);
     const b = displayAngle(it.displayEnd);
-    ctx.beginPath(); ctx.moveTo(C, C); ctx.arc(C, C, R, a, b); ctx.closePath();
+    const emphasis = wedgeAnimation[i] || 0;
+    const itemRadius = R + emphasis * 12;
+    ctx.save();
+    if (emphasis > 0) {
+      ctx.shadowColor = 'rgba(49, 43, 34, .22)';
+      ctx.shadowBlur = 16 * emphasis;
+      ctx.shadowOffsetY = 5 * emphasis;
+    }
+    ctx.beginPath(); ctx.moveTo(C, C); ctx.arc(C, C, itemRadius, a, b); ctx.closePath();
     ctx.fillStyle = it.color; ctx.globalAlpha = i === selected ? 1 : .82; ctx.fill(); ctx.globalAlpha = 1;
     ctx.strokeStyle = '#f8f4ec'; ctx.lineWidth = 5; ctx.stroke();
-    const mid = (a + b) / 2, rr = i === selected ? 236 : 226;
-    ctx.save(); ctx.translate(C + Math.cos(mid) * rr, C + Math.sin(mid) * rr); ctx.rotate(mid + Math.PI / 2);
-    ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '700 18px Noto Sans KR';
-    const label = it.title.length > 10 ? `${it.title.slice(0, 9)}…` : it.title;
-    ctx.fillText(label, 0, 0); ctx.font = '600 14px DM Sans'; ctx.fillText(`${fmt(it.start)}–${fmt(it.end)}`, 0, 23); ctx.restore();
+    ctx.restore();
+
+    const mid = (a + b) / 2;
+    const span = Math.min(Math.PI * 2, b - a);
+    const rr = 205 + emphasis * 7;
+    const tx = C + Math.cos(mid) * rr;
+    const ty = C + Math.sin(mid) * rr;
+    const maxTextWidth = Math.min(205, itemRadius - 116);
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(C, C); ctx.arc(C, C, itemRadius - 4, a, b); ctx.closePath(); ctx.clip();
+    ctx.translate(tx, ty);
+    let textAngle = mid;
+    if (Math.cos(textAngle) < 0) textAngle += Math.PI;
+    ctx.rotate(textAngle);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+    const titleFont = span < .18 ? 13 : span < .32 ? 15 : 18;
+    ctx.font = `700 ${titleFont}px Noto Sans KR`;
+    const label = fitHorizontalLabel(ctx, it.title, maxTextWidth);
+    if (label) ctx.fillText(label, 0, -8, maxTextWidth);
+    if (span >= .16) {
+      ctx.font = '600 13px DM Sans';
+      const timeLabel = fitHorizontalLabel(ctx, `${fmt(it.start)}–${fmt(it.end)}`, maxTextWidth);
+      if (timeLabel) ctx.fillText(timeLabel, 0, 13, maxTextWidth);
+    }
+    ctx.restore();
   });
   for (let h = 0; h < 24; h++) {
     const minute = h * 60;
@@ -151,11 +190,38 @@ function draw() {
     ctx.strokeStyle = '#ffffffaa'; ctx.lineWidth = h % 3 === 0 ? 4 : 2; ctx.stroke();
     if (h % 3 === 0) { ctx.fillStyle = '#5d5a52'; ctx.font = '700 15px DM Sans'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(h, C + Math.cos(a) * (R + 23), C + Math.sin(a) * (R + 23)); }
   }
-  if (dragSelection) {
+  if (dragSelection && !dragSelection.selectingExisting) {
     const a = displayAngle(dragSelection.start), b = displayAngle(dragSelection.end);
     ctx.beginPath(); ctx.moveTo(C, C); ctx.arc(C, C, R, a, b); ctx.closePath();
     ctx.fillStyle = '#ffffff70'; ctx.fill(); ctx.strokeStyle = '#292b27'; ctx.lineWidth = 5; ctx.setLineDash([12,8]); ctx.stroke(); ctx.setLineDash([]);
   }
+}
+
+function animateTouchedWedge(index) {
+  touchedItemIndex = index;
+  if (wedgeAnimationFrame) return;
+  const tick = () => {
+    let moving = false;
+    const count = items().length;
+    for (let i = 0; i < count; i++) {
+      const target = i === touchedItemIndex ? 1 : 0;
+      const current = wedgeAnimation[i] || 0;
+      const next = current + (target - current) * .24;
+      wedgeAnimation[i] = Math.abs(target - next) < .01 ? target : next;
+      if (wedgeAnimation[i] !== target) moving = true;
+    }
+    draw(); drawNowMarker();
+    if (moving) wedgeAnimationFrame = requestAnimationFrame(tick);
+    else wedgeAnimationFrame = 0;
+  };
+  wedgeAnimationFrame = requestAnimationFrame(tick);
+}
+
+function itemAtMinute(minute) {
+  return displayItems().find(it =>
+    (minute >= it.displayStart && minute < it.displayEnd) ||
+    (minute + 1440 >= it.displayStart && minute + 1440 < it.displayEnd)
+  );
 }
 
 function drawNowMarker() {
@@ -392,13 +458,17 @@ function showDragHint(start, end) {
 
 $('#clock').addEventListener('pointerdown', e => {
   if (!plan()) return startWizard();
+  e.preventDefault();
   const minute = pointerDisplayMinute(e);
-  const existing = displayItems().find(it => (minute >= it.displayStart && minute < it.displayEnd) || (minute + 1440 >= it.displayStart && minute + 1440 < it.displayEnd));
+  const existing = itemAtMinute(minute);
   if (existing) {
-    dragSelection = { existingIndex: existing._index, startX: e.clientX, startY: e.clientY };
+    dragSelection = { selectingExisting: true, existingIndex: existing._index };
+    selected = existing._index;
+    $('#clock').setPointerCapture(e.pointerId);
+    animateTouchedWedge(existing._index);
+    renderSelected();
     return;
   }
-  e.preventDefault();
   const nextBoundary = Math.min(dayStart() + 1440, ...displayItems().filter(it => it.displayStart > minute).map(it => it.displayStart));
   dragSelection = { start: minute, end: Math.min(minute + 5, nextBoundary), nextBoundary, moved: false };
   $('#clock').setPointerCapture(e.pointerId);
@@ -407,8 +477,20 @@ $('#clock').addEventListener('pointerdown', e => {
 });
 
 $('#clock').addEventListener('pointermove', e => {
-  if (!dragSelection || dragSelection.existingIndex !== undefined) return;
+  if (!dragSelection) return;
   e.preventDefault();
+  if (dragSelection.selectingExisting) {
+    const existing = itemAtMinute(pointerDisplayMinute(e));
+    if (existing && existing._index !== selected) {
+      selected = existing._index;
+      dragSelection.existingIndex = existing._index;
+      animateTouchedWedge(existing._index);
+      renderSelected();
+    } else if (!existing) {
+      animateTouchedWedge(-1);
+    }
+    return;
+  }
   let end = pointerDisplayMinute(e);
   if (end < dragSelection.start) end += 1440;
   end = Math.min(end, dragSelection.nextBoundary, dayStart() + 1440);
@@ -420,10 +502,10 @@ $('#clock').addEventListener('pointermove', e => {
 
 $('#clock').addEventListener('pointerup', e => {
   if (!dragSelection) return;
-  if (dragSelection.existingIndex !== undefined) {
-    const moved = Math.hypot(e.clientX - dragSelection.startX, e.clientY - dragSelection.startY) > 8;
-    if (!moved) { selected = dragSelection.existingIndex; dragSelection = null; render(); }
-    else dragSelection = null;
+  if (dragSelection.selectingExisting) {
+    dragSelection = null;
+    animateTouchedWedge(-1);
+    renderSelected();
     return;
   }
   const range = { ...dragSelection };
@@ -431,7 +513,11 @@ $('#clock').addEventListener('pointerup', e => {
   dragSelection = null; $('#dragHint').classList.remove('show'); render(); openNewRange(range.start, range.end);
 });
 
-$('#clock').addEventListener('pointercancel', () => { dragSelection = null; $('#dragHint').classList.remove('show'); render(); });
+$('#clock').addEventListener('pointercancel', () => { dragSelection = null; animateTouchedWedge(-1); $('#dragHint').classList.remove('show'); render(); });
+document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+document.addEventListener('gesturechange', e => e.preventDefault(), { passive: false });
+document.addEventListener('gestureend', e => e.preventDefault(), { passive: false });
+document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
 $$('nav button').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 $('#prevDay').onclick = () => { dayIndex = (dayIndex + 6) % 7; selected = -1; render(); };
 $('#nextDay').onclick = () => { dayIndex = (dayIndex + 1) % 7; selected = -1; render(); };

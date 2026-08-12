@@ -56,7 +56,14 @@
 .auth-button.signed-in { color: #8a6d59; }
 .copy-day-button { width: 100%; margin: -6px 0 14px; padding: 11px; border: 1px dashed #9baa8e; border-radius: 13px; background: #edf1e8; color: #52624a; font-size: 12px; font-weight: 700; }
 
-#clock { touch-action: none; }
+html, body { touch-action: pan-x pan-y; }
+#clock { touch-action: none; -webkit-tap-highlight-color: transparent; }
+.clock-wrap {
+  width: min(100%, 420px, 55dvh);
+  min-width: min(100%, 280px);
+  user-select: none;
+  -webkit-user-select: none;
+}
 .drag-hint { position: absolute; z-index: 4; top: 13%; left: 50%; padding: 8px 13px; transform: translate(-50%,-8px); border-radius: 18px; background: #292b27; color: white; font-size: 11px; font-weight: 700; opacity: 0; pointer-events: none; transition: .15s; white-space: nowrap; }
 .drag-hint.show { transform: translate(-50%,0); opacity: 1; }
 .color-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 13px 0; padding: 11px 13px; border: 1px solid #ded9ce; border-radius: 14px; background: white; }
